@@ -82,17 +82,29 @@ async function sendMessage() {
       payload.longitude = state.coords.lng;
     }
     const { error } = await sb.from("messages").insert(payload);
-    if (error) { showBanner(humanizeError(error)); return; }
+    if (error) { 
+      console.error("Error detallado de Supabase:", error); 
+      showBanner(humanizeError(error)); 
+      return; 
+    }
   } else if (thread.type === "group") {
     payload.scope = "group";
     payload.group_id = thread.id;
     const { error } = await sb.from("messages").insert(payload);
-    if (error) { showBanner(humanizeError(error)); return; }
+    if (error) { 
+      console.error("Error detallado de Supabase:", error); 
+      showBanner(humanizeError(error)); 
+      return; 
+    }
   } else {
     payload.scope = "direct";
     payload.receiver_id = thread.id;
     const { error } = await sb.from("messages").insert(payload);
-    if (error) { showBanner(humanizeError(error)); return; }
+    if (error) { 
+      console.error("Error detallado de Supabase:", error); 
+      showBanner(humanizeError(error)); 
+      return; 
+    }
   }
 
   state.composerText = "";
