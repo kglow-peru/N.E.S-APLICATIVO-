@@ -59,7 +59,6 @@ function toggleLocAttach() {
 
 async function sendMessage() {
   const thread = state.openThread;
-  if (!thread) return;
   const text = state.composerText.trim();
   if (!text && !state.composerLoc) return;
 
@@ -68,13 +67,22 @@ async function sendMessage() {
     text: text || "📍 Ubicación compartida",
     created_at: new Date().toISOString(),
   };
+  
   if (state.composerLoc && state.coords) {
     payload.latitude = state.coords.lat;
     payload.longitude = state.coords.lng;
   }
 
-  if (thread === "broadcast" || thread.type === "broadcast") {
-    await sendBroadcast(payload);
+  // Si no hay un hilo abierto (es el chat principal del mapa), enviamos como broadcast cercano
+  if (!thread || thread === "broadcast" || thread.type === "broadcast") {
+    payload.scope = "broadcast_near";
+    payload.radius_m = state.radiusM || 1000;
+    if (state.coords) {
+      payload.latitude = state.coords.lat;
+      payload.longitude = state.coords.lng;
+    }
+    const { error } = await sb.from("messages").insert(payload);
+    if (error) { showBanner(humanizeError(error)); return; }
   } else if (thread.type === "group") {
     payload.scope = "group";
     payload.group_id = thread.id;
@@ -91,7 +99,6 @@ async function sendMessage() {
   state.composerLoc = false;
   render();
 }
-
 
 function ingestIncomingMessage(msg) {
   if (msg.scope === "direct") {
