@@ -70,11 +70,6 @@ function setScope(scope) {
 }
 
 async function sendBroadcast(payload) {
-  if (!state.me || !state.me.id) {
-    showBanner("Tu sesión no es válida. Vuelve a iniciar sesión.");
-    return;
-  }
-
   if (state.notifyScope === "todos") {
     payload.scope = "broadcast_all";
   } else {
@@ -85,29 +80,8 @@ async function sendBroadcast(payload) {
     payload.radius_m = state.radiusM;
   }
 
-  const { data: inserted, error } = await sb
-    .from("messages")
-    .insert(payload)
-    .select()
-    .single();
-
-  if (error) {
-    console.error("[sendBroadcast] insert error:", error);
-    showBanner(humanizeError(error));
-    return;
-  }
-
-  // Añadimos al estado local ya mismo (dedup contra eco realtime)
-  if (inserted && inserted.scope === "broadcast_all") {
-    if (!state.broadcastAll.some((m) => m.id === inserted.id)) {
-      state.broadcastAll.push(inserted);
-    }
-  } else if (inserted) {
-    if (!state.broadcastNear.some((m) => m.id === inserted.id)) {
-      state.broadcastNear.unshift(inserted);
-    }
-  }
-  render();
+  const { error } = await sb.from("messages").insert(payload);
+  if (error) { showBanner(humanizeError(error)); return; }
 
   if (payload.scope === "broadcast_all") {
     toast("Enviado a todos los usuarios de N.E.S.");
@@ -124,47 +98,34 @@ async function loadBroadcastHistory() {
     .in("scope", ["broadcast_all", "broadcast_near"])
     .order("created_at", { ascending: true })
     .limit(200);
-  if (error) { console.error("[loadBroadcastHistory]", error); return; }
+  if (error) { showBanner(humanizeError(error)); return; }
   state.broadcastAll = (data || []).filter((m) => m.scope === "broadcast_all");
   render();
 }
 
+// Mensaje del chat del mapa: se publica en las coordenadas donde estás en
+// este momento y aparece como burbuja sobre tu propio punto.
 async function sendMapMessage() {
   const text = (state.mapComposerText || "").trim();
   if (!text) return;
   if (!state.coords) { toast("Activa tu ubicación primero."); return; }
-  if (!state.me || !state.me.id) { showBanner("Tu sesión no es válida."); return; }
 
-  const saved = state.mapComposerText;
+  const { error } = await sb.from("messages").insert({
+    sender_id: state.me.id,
+    scope: "geo",
+    text,
+    latitude: state.coords.lat,
+    longitude: state.coords.lng,
+    radius_m: state.radiusM,
+    created_at: new Date().toISOString(),
+  });
 
-  const { data: inserted, error } = await sb
-    .from("messages")
-    .insert({
-      sender_id: state.me.id,
-      scope: "geo",
-      text,
-      latitude: state.coords.lat,
-      longitude: state.coords.lng,
-      radius_m: state.radiusM,
-      created_at: new Date().toISOString(),
-    })
-    .select()
-    .single();
-
-  if (error) {
-    console.error("[sendMapMessage] insert error:", error);
-    state.mapComposerText = saved;
-    render();
-    showBanner(humanizeError(error));
-    return;
-  }
-
-  if (inserted && !state.broadcastNear.some((m) => m.id === inserted.id)) {
-    state.broadcastNear.unshift(inserted);
-  }
+  if (error) { showBanner(humanizeError(error)); return; }
 
   state.mapComposerText = "";
   render();
+
+  // Tu mensaje, anclado a tu marcador: si te mueves, la burbuja te sigue.
   showMapBubbleForMe(text);
 
   const count = nearbyUsers().length;
@@ -178,7 +139,7 @@ async function loadNearbyGeoHistory() {
     .eq("scope", "geo")
     .order("created_at", { ascending: false })
     .limit(100);
-  if (error) { console.error("[loadNearbyGeoHistory]", error); return; }
+  if (error) return;
   state.broadcastNear = data || [];
   render();
 }
