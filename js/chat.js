@@ -21,7 +21,7 @@ async function loadDirectHistory(otherId) {
     .or(`and(sender_id.eq.${me},receiver_id.eq.${otherId}),and(sender_id.eq.${otherId},receiver_id.eq.${me})`)
     .order("created_at", { ascending: true });
 
-  if (error) { showBanner(humanizeError(error)); return; }
+  if (error) { console.error("[loadDirectHistory]", error); showBanner(humanizeError(error)); return; }
   state.directChats[otherId] = data || [];
   render();
 }
@@ -35,7 +35,7 @@ async function loadGroupHistory(groupId) {
     .eq("group_id", groupId)
     .order("created_at", { ascending: true });
 
-  if (error) { showBanner(humanizeError(error)); return; }
+  if (error) { console.error("[loadGroupHistory]", error); showBanner(humanizeError(error)); return; }
   state.groupMessages[groupId] = data || [];
   render();
 }
@@ -57,53 +57,81 @@ function toggleLocAttach() {
   render();
 }
 
+// ---------------------------------------------------------------------
+// FIX PRINCIPAL: además de insertar, AÑADIMOS el mensaje al estado
+// local para que aparezca inmediatamente (sin depender del eco de
+// Realtime). Realtime igual llegará y el dedup por `id` evita duplicarlo.
+// ---------------------------------------------------------------------
 async function sendMessage() {
   const thread = state.openThread;
-  const text = state.composerText.trim();
+  if (!thread) return;
+
+  if (!state.me || !state.me.id) {
+    showBanner("Tu sesión no es válida. Vuelve a iniciar sesión.");
+    return;
+  }
+
+  const text = (state.composerText || "").trim();
   if (!text && !state.composerLoc) return;
+
+  // Snapshot para poder restaurar si falla
+  const savedText = state.composerText;
+  const savedLoc = state.composerLoc;
 
   const payload = {
     sender_id: state.me.id,
     text: text || "📍 Ubicación compartida",
     created_at: new Date().toISOString(),
   };
-  
   if (state.composerLoc && state.coords) {
     payload.latitude = state.coords.lat;
     payload.longitude = state.coords.lng;
   }
 
-  // Si no hay un hilo abierto (es el chat principal del mapa), enviamos como broadcast cercano
-  if (!thread || thread === "broadcast" || thread.type === "broadcast") {
-    payload.scope = "broadcast_near";
-    payload.radius_m = state.radiusM || 1000;
-    if (state.coords) {
-      payload.latitude = state.coords.lat;
-      payload.longitude = state.coords.lng;
-    }
-    const { error } = await sb.from("messages").insert(payload);
-    if (error) { 
-      console.error("Error detallado de Supabase:", error); 
-      showBanner(humanizeError(error)); 
-      return; 
-    }
-  } else if (thread.type === "group") {
+  // ---- Difusión ----
+  if (thread === "broadcast" || thread.type === "broadcast") {
+    state.composerText = "";
+    state.composerLoc = false;
+    render();
+    await sendBroadcast(payload);
+    return;
+  }
+
+  // ---- Grupo / Directo ----
+  let result;
+  if (thread.type === "group") {
     payload.scope = "group";
     payload.group_id = thread.id;
-    const { error } = await sb.from("messages").insert(payload);
-    if (error) { 
-      console.error("Error detallado de Supabase:", error); 
-      showBanner(humanizeError(error)); 
-      return; 
-    }
   } else {
     payload.scope = "direct";
     payload.receiver_id = thread.id;
-    const { error } = await sb.from("messages").insert(payload);
-    if (error) { 
-      console.error("Error detallado de Supabase:", error); 
-      showBanner(humanizeError(error)); 
-      return; 
+  }
+
+  result = await sb.from("messages").insert(payload).select().single();
+
+  if (result.error) {
+    console.error("[sendMessage] insert error:", result.error);
+    // Restauramos el texto para que el usuario no lo pierda
+    state.composerText = savedText;
+    state.composerLoc = savedLoc;
+    render();
+    showBanner(humanizeError(result.error));
+    return;
+  }
+
+  // ✅ Insert OK: metemos el mensaje al estado local ya mismo
+  const inserted = result.data;
+  if (inserted) {
+    if (thread.type === "group") {
+      if (!state.groupMessages[thread.id]) state.groupMessages[thread.id] = [];
+      if (!state.groupMessages[thread.id].some((m) => m.id === inserted.id)) {
+        state.groupMessages[thread.id].push(inserted);
+      }
+    } else {
+      if (!state.directChats[thread.id]) state.directChats[thread.id] = [];
+      if (!state.directChats[thread.id].some((m) => m.id === inserted.id)) {
+        state.directChats[thread.id].push(inserted);
+      }
     }
   }
 
@@ -113,6 +141,8 @@ async function sendMessage() {
 }
 
 function ingestIncomingMessage(msg) {
+  if (!state.me) return;
+
   if (msg.scope === "direct") {
     const otherId = msg.sender_id === state.me.id ? msg.receiver_id : msg.sender_id;
     if (!state.directChats[otherId]) state.directChats[otherId] = [];
